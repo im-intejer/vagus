@@ -1,0 +1,20 @@
+[vendor]
+name = "intejer"
+id = "com.intejer"
+url = "https://example.com"
+au_manufacturer = "MCom"
+
+[[plugin]]
+name = "Vagus"
+bundle_id = "vagus"
+crate = "vagus"
+category = "instrument"
+fourcc = "Vgus"
+au_tag = "Synthesizer"
+# VST3 secondary subcategory — drives the Cubase plugin submenu.
+# Tighten to your effect kind: "Delay", "Distortion", "Dynamics",
+# "EQ", "Filter", "Mastering", "Modulation", "Pitch Shift",
+# "Reverb", "Surround", "Analyzer", "Spatial". Leave as "Tools" for
+# generic utilities. Without this, Cubase buckets the plugin under
+# "Other".
+vst3_subcategory = "Synth"
