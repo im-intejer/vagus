@@ -13,7 +13,7 @@ use std::sync::Arc;
 use truce::core::midi::{norm_7bit, norm_pitch_bend};
 use truce::prelude64::*;
 use truce_gui::IntoLayoutEditor;
-use truce_gui_types::layout::{GridLayout, dropdown, knob, section, widgets};
+use truce_gui_types::layout::{GridLayout, dropdown, knob, section};
 
 mod voice;
 use voice::Voice;
@@ -38,71 +38,6 @@ use VagusParamsParamId as P;
 use crate::voice::PolyVoice;
 
 #[derive(Params)]
-pub struct FilterParams {
-    #[param(
-        name = "Filter Cutoff",
-        short_name = "Cutoff",
-        group = "Filter",
-        range = "log(20, 20000)",
-        default = 8000.0,
-        unit = "Hz",
-        smooth = "exp(5)"
-    )]
-    pub cutoff: FloatParam,
-
-    #[param(
-        name = "Filter Resonance",
-        short_name = "Reso",
-        group = "Filter",
-        range = "linear(0, 1)",
-        smooth = "exp(5)"
-    )]
-    pub resonance: FloatParam,
-}
-
-#[derive(Params)]
-pub struct EnvParams {
-    #[param(
-        name = "Attack",
-        short_name = "Atk",
-        group = "Envelope",
-        range = "log(0.001, 5)",
-        default = 0.01,
-        unit = "s"
-    )]
-    pub attack: FloatParam,
-
-    #[param(
-        name = "Decay",
-        short_name = "Dec",
-        group = "Envelope",
-        range = "log(0.001, 5)",
-        default = 0.1,
-        unit = "s"
-    )]
-    pub decay: FloatParam,
-
-    #[param(
-        name = "Sustain",
-        short_name = "Sus",
-        group = "Envelope",
-        range = "linear(0, 1)",
-        default = 0.7
-    )]
-    pub sustain: FloatParam,
-
-    #[param(
-        name = "Release",
-        short_name = "Rel",
-        group = "Envelope",
-        range = "log(0.01, 10)",
-        default = 0.3,
-        unit = "s"
-    )]
-    pub release: FloatParam,
-}
-
-#[derive(Params)]
 pub struct VagusParams {
     #[param(name = "Algorithm", short_name = "Algorithm", default = 0)]
     pub algorithm: EnumParam<Exciter>,
@@ -118,12 +53,15 @@ pub struct VagusParams {
     #[param(
         name = "Spectral Tilt",
         short_name = "SpecTilt",
-        range = "linear(0, 10)",
+        range = "linear(0, 360)",
         default = 0.0,
         unit = "deg",
         smooth = "exp(5)"
     )]
     pub spectral_tilt: FloatParam,
+
+    #[param(name = "Damping", default = 0.5, smooth = "exp(5)")]
+    pub damping: FloatParam,
 
     #[param(name = "Mesh", short_name = "Mesh", default = 0)]
     pub mesh: EnumParam<Mesh>,
@@ -165,7 +103,6 @@ pub struct VagusParams {
 }
 
 // --- Plugin ---
-
 const MAX_VOICES: usize = 16;
 
 /// Pitch-bend range in semitones at full deflection, matching the
@@ -232,12 +169,17 @@ impl PolyManager {
 
         // Hard-reset or gracefully fade the stolen voice, then trigger it
         let voice = &mut self.voices[target_idx];
-        voice.voice.note_on(note_freq, 0.0);
+        voice.voice.exciter.tilt = params.spectral_tilt.read();
+        voice.voice.note_on(note_freq);
         voice.is_released = false;
         voice.midi_note = note;
         voice.triggered_at = self.time_counter;
+    }
 
-        // ... call voice.dsp.note_on(freq, velocity) here
+    pub fn note_off(&mut self, note: u8) {
+        if let Some(v) = self.find_voice_with_note(note) {
+            self.voices[v].voice.note_off();
+        }
     }
 
     fn find_voice_to_steal(&self, new_note: u8) -> usize {
@@ -247,8 +189,8 @@ impl PolyManager {
         }
 
         // 2. Look for a voice playing the exact same note
-        if let Some(idx) = self.voices.iter().position(|v| v.midi_note == new_note) {
-            return idx;
+        if let Some(value) = self.find_voice_with_note(new_note) {
+            return value;
         }
 
         // 3. Look for the oldest voice in the RELEASE phase
@@ -280,6 +222,13 @@ impl PolyManager {
         oldest_idx
     }
 
+    fn find_voice_with_note(&self, note: u8) -> Option<usize> {
+        if let Some(idx) = self.voices.iter().position(|v| v.midi_note == note) {
+            return Some(idx);
+        }
+        None
+    }
+
     pub fn none_playing(&self) -> bool {
         self.voices.iter().all(|v| !v.voice.active)
     }
@@ -296,13 +245,9 @@ impl VagusDspState {
         self.poly_manager.note_on(params, note, velocity);
     }
 
-    // fn note_off(&mut self, note: u8) {
-    //     for voice in &mut self.voices {
-    //         if voice.midi_note == note && !voice.is_released {
-    //             voice.is_released = true;
-    //         }
-    //     }
-    // }
+    fn note_off(&mut self, note: u8) {
+        self.poly_manager.note_off(note);
+    }
 }
 
 /// Stateless descriptor - the synth's per-block DSP state is [`SynthDspState`].
@@ -346,7 +291,7 @@ impl PluginLogic for Vagus {
                     EventBody::NoteOn { note, velocity, .. } => {
                         state.note_on(params, *note, norm_7bit(*velocity));
                     }
-                    // EventBody::NoteOff { note, .. } => state.note_off(*note),
+                    EventBody::NoteOff { note, .. } => state.note_off(*note),
                     EventBody::PitchBend { value, .. } => state.pitch_bend(*value),
                     // CC1 is the mod wheel; steer vibrato depth from it.
                     EventBody::ControlChange { cc: 1, value, .. } => {
