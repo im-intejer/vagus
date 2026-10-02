@@ -30,6 +30,7 @@ rt-paranoid = ["truce/rt-paranoid"]
 
 [dependencies]
 truce = { version = "6.3" }
+truce-test = "2.0"
 # Lightweight types for layout / theme / widget descriptions.
 truce-gui-types = { version = "6.3" }
 # Built-in renderer. Plugins that supply their own editor (egui /
@@ -39,6 +40,7 @@ truce-clap = { version = "6.3", optional = true }
 truce-vst3 = { version = "6.3", optional = true }
 truce-standalone = { version = "6.3", features = ["gui"], optional = true }
 clap-sys = { version = "0.5", optional = true }
+rand = "0.10.3"
 
 # Custom profile for `cargo truce install --shell`. The shell-mode
 # build (`cargo build --profile shell --features ...,shell`) lands the
