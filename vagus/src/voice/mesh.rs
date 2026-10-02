@@ -21,8 +21,8 @@ impl NonlinearMesh {
             ],
             // In a real synth, these delay times dictate the physical "size" and "shape" of the resonator
             delay_times: [142.3, 211.5, 345.1, 411.7],
-            damping: 0.98, // High frequency loss in the "material"
-            drive: 2.0,    // Pushes the mesh into non-linear chaos
+            damping: 0.2, // High frequency loss in the "material"
+            drive: 1.0,   // Pushes the mesh into non-linear chaos
         }
     }
 
@@ -37,17 +37,17 @@ impl NonlinearMesh {
         // Calculate nonlinear scattering junctions (cross-coupling nodes)
         // Node 0 connects to 1 and 2, Node 3 connects to 1 and 2.
         let s0 = fast_tanh((v1 + v2 + exciter_in) * self.drive) * self.damping;
-        // let s1 = fast_tanh((v0 + v3) * self.drive) * self.damping;
-        // let s2 = fast_tanh((v0 + v3) * self.drive) * self.damping;
-        // let s3 = fast_tanh((v1 + v2) * self.drive) * self.damping;
+        let s1 = fast_tanh((v0 + v3) * self.drive) * self.damping;
+        let s2 = fast_tanh((v0 + v3) * self.drive) * self.damping;
+        let s3 = fast_tanh((v1 + v2) * self.drive) * self.damping;
 
         // Push new energy into the delay network
         self.nodes[0].push(s0);
-        // self.nodes[1].push(s1);
-        // self.nodes[2].push(s2);
-        // self.nodes[3].push(s3);
+        self.nodes[1].push(s1);
+        self.nodes[2].push(s2);
+        self.nodes[3].push(s3);
 
         // Tap the mesh at node 3 for output
-        v0
+        v3
     }
 }

@@ -38,7 +38,7 @@ impl SpectralExciter {
             *inc = (freq * TAU) / self.sample_rate;
 
             // Spectral tilt: adjust bin amplitudes (e.g., negative tilt = lowpass, positive = highpass)
-            *amp = partial.powf(self.tilt);
+            *amp = partial.powf((self.tilt / 360.0) * 2.0);
         }
     }
 
