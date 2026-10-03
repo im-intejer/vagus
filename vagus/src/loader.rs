@@ -4,12 +4,13 @@
 //! lock-free queues. New corpora arrive through `incoming`, and replaced ones
 //! are sent back through `garbage` so they are freed off the audio thread.
 //!
-//! Files are picked from a folder. Set TRUCE_GRAIN_DIR to choose it, otherwise
-//! `~/TruceGrain` is used. Slot 1 is the first file by name, slot 2 the next,
-//! and slot 0 is the built-in corpus. `Loader::request_path` loads one file
-//! directly, which is the hook for a file dialog or drag and drop.
+//! Files live in the managed library folder (see `library.rs`). Set
+//! TRUCE_GRAIN_DIR to choose it, otherwise `~/TruceGrain` is used. A slot is a
+//! stable library id, and slot 0 is the built-in corpus.
+//! `Loader::request_path` loads one file directly without importing it.
 
 use crate::corpus::Corpus;
+use crate::library;
 use crossbeam_queue::ArrayQueue;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -25,7 +26,6 @@ use symphonia::core::meta::MetadataOptions;
 
 /// Files longer than this are truncated.
 pub const MAX_SECONDS: f64 = 120.0;
-const EXTENSIONS: [&str; 4] = ["wav", "flac", "mp3", "ogg"];
 
 pub fn sample_dir() -> PathBuf {
     if let Ok(d) = std::env::var("TRUCE_GRAIN_DIR") {
@@ -35,24 +35,6 @@ pub fn sample_dir() -> PathBuf {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
     PathBuf::from(home).join("TruceGrain")
-}
-
-pub fn list_files(dir: &Path) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
-                        .unwrap_or(false)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    files.sort();
-    files
 }
 
 /// Decode any supported file to mono f32. Returns (samples, sample_rate).
@@ -124,12 +106,16 @@ pub fn decode_file(path: &Path) -> Result<(Vec<f32>, f64), String> {
 }
 
 pub fn load_corpus(path: &Path) -> Result<Corpus, String> {
-    let (samples, sr) = decode_file(path)?;
     let name = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("file")
         .to_string();
+    load_corpus_named(path, name)
+}
+
+pub fn load_corpus_named(path: &Path, name: String) -> Result<Corpus, String> {
+    let (samples, sr) = decode_file(path)?;
     Ok(Corpus::from_mono(name, samples, sr))
 }
 
@@ -240,11 +226,10 @@ fn worker_loop(sh: Arc<LoaderShared>) {
             if want <= 0 {
                 publish(&sh, sh.builtin.clone());
             } else {
-                let files = list_files(&dir);
-                match files.get(want as usize - 1) {
-                    Some(p) => match load_corpus(p) {
+                match library::find(&dir, want as u32) {
+                    Some(e) => match load_corpus_named(&e.path, e.name.clone()) {
                         Ok(c) => publish(&sh, Arc::new(c)),
-                        Err(e) => set_status(&sh, format!("Load failed, {e}")),
+                        Err(err) => set_status(&sh, format!("Load failed, {err}")),
                     },
                     None => set_status(&sh, format!("No file in slot {want}")),
                 }

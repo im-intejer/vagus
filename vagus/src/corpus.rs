@@ -29,6 +29,15 @@ pub fn brightness(rms: f32, rms_diff: f32, sample_rate: f32) -> f32 {
     ((f / 50.0).log2() / (16000.0f32 / 50.0).log2()).clamp(0.0, 1.0)
 }
 
+/// One column of a waveform overview, for drawing in an editor.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Overview {
+    pub min: f32,
+    pub max: f32,
+    /// Mean brightness 0..1, handy for colouring the waveform.
+    pub bright: f32,
+}
+
 pub struct Corpus {
     pub name: String,
     pub samples: Vec<f32>,
@@ -96,6 +105,34 @@ impl Corpus {
     #[inline]
     pub fn read(&self, pos: f64) -> f64 {
         read_clamped(&self.samples, pos)
+    }
+
+    /// Min, max and brightness for `bins` equal columns across the file.
+    pub fn overview(&self, bins: usize) -> Vec<Overview> {
+        let n = self.samples.len();
+        if bins == 0 || n == 0 {
+            return Vec::new();
+        }
+        (0..bins)
+            .map(|b| {
+                let a = b * n / bins;
+                let z = (((b + 1) * n / bins).max(a + 1)).min(n);
+                let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+                for &x in &self.samples[a..z] {
+                    lo = lo.min(x);
+                    hi = hi.max(x);
+                }
+                let s0 = (a / HOP).min(self.slots.len() - 1);
+                let s1 = ((z - 1) / HOP).min(self.slots.len() - 1).max(s0);
+                let bright = self.slots[s0..=s1].iter().map(|s| s.bright).sum::<f32>()
+                    / (s1 - s0 + 1) as f32;
+                Overview {
+                    min: lo,
+                    max: hi,
+                    bright,
+                }
+            })
+            .collect()
     }
 
     /// Tournament selection. Draws `k` random slots from a window around
@@ -226,6 +263,20 @@ mod tests {
             let s = c.choose(0.2, 0.1, 1, 0.5, 0.5, &mut rng);
             assert!((12..=28).contains(&s), "slot {s} outside window");
         }
+    }
+
+    #[test]
+    fn overview_covers_file() {
+        let sr = 44100.0;
+        let mut s = sine(200.0, sr, HOP * 20);
+        s.extend(sine(8000.0, sr, HOP * 20));
+        let c = Corpus::from_mono("o", s, sr);
+        let o = c.overview(40);
+        assert_eq!(o.len(), 40);
+        assert!(o.iter().all(|c| c.min <= c.max));
+        assert!(o[35].bright > o[5].bright);
+        assert!(c.overview(0).is_empty());
+        assert_eq!(c.overview(100_000).len(), 100_000);
     }
 
     #[test]

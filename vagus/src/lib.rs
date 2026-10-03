@@ -5,9 +5,10 @@
 // framework-free modules below. This file only maps parameters and MIDI onto
 // `engine::Engine`.
 //
-// Importing audio. Put wav, flac, mp3 or ogg files in ~/TruceGrain (or the
-// folder named by TRUCE_GRAIN_DIR). The Sample knob picks them in name order,
-// 0 is the built-in sound, 1 is the first file, and so on.
+// Importing audio. Files live in a managed library folder, ~/TruceGrain or the
+// folder named by TRUCE_GRAIN_DIR, as NNNN_name.ext. The Sample parameter holds
+// the file's stable id, with 0 meaning the built-in sound. `library::import`
+// copies a file in and returns its id, which is what a drop handler sets.
 
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ pub mod corpus;
 pub mod engine;
 pub mod fdn;
 pub mod grain;
+pub mod library;
 pub mod loader;
 pub mod util;
 pub mod voice;
@@ -34,7 +36,7 @@ pub struct SourceParams {
         name = "Sample",
         short_name = "Sample",
         group = "Source",
-        range = "linear(0, 63)",
+        range = "linear(0, 9999)",
         default = 0.0
     )]
     pub sample: FloatParam,
@@ -43,10 +45,11 @@ pub struct SourceParams {
         name = "Root Note",
         short_name = "Root",
         group = "Source",
-        range = "linear(24, 96)",
-        default = 60.0
+        range = "linear(21, 108)",
+        default = 60.0,
+        unit = "st"
     )]
-    pub root: FloatParam,
+    pub root: IntParam,
 }
 
 #[derive(Params)]
@@ -334,40 +337,16 @@ pub struct Synth;
 
 pub struct SynthDspState {
     engine: Engine,
+    settings: EngineSettings,
 }
 
 impl Default for SynthDspState {
     fn default() -> Self {
         SynthDspState {
             engine: Engine::new(44100.0),
+            settings: EngineSettings::default(),
         }
     }
-}
-
-/// Everything that does not change inside a block. Read once per block.
-fn block_settings(p: &SynthParams) -> EngineSettings {
-    let mut s = EngineSettings::default();
-    s.root = p.source.root.value().round();
-    s.follow = p.grains.follow.value();
-    s.attack = p.envelope.attack.value();
-    s.decay = p.envelope.decay.value();
-    s.sustain = p.envelope.sustain.value();
-    s.release = p.envelope.release.value();
-
-    s.cloud.spread = p.grains.spread.value();
-    s.cloud.grain_s = p.grains.size.value() * 0.001;
-    s.cloud.density = p.grains.density.value();
-    s.cloud.detune_cents = p.grains.detune.value();
-    s.cloud.width = p.grains.width.value();
-    s.cloud.focus = p.grains.focus.value().round().max(1.0) as u32;
-
-    s.fdn.memory_s = p.memory.length.value();
-    s.fdn.grain_s = p.memory.grain.value() * 0.001;
-    s.fdn.shift_semi = p.memory.shift.value();
-    s.fdn.tone = p.memory.tone.value();
-    s.fdn.focus = p.memory.focus.value().round().max(1.0) as u32;
-    s.fdn.damp_hz = p.memory.damp.value();
-    s
 }
 
 impl PluginLogic for Synth {
@@ -390,7 +369,10 @@ impl PluginLogic for Synth {
         _context: &mut ProcessContext,
     ) -> ProcessStatus {
         let engine = &mut state.engine;
-        let mut settings = block_settings(params);
+
+        let settings = &mut state.settings;
+        settings.update_block_settings(params);
+
         engine.begin_block(params.source.sample.value().round() as i64);
 
         let mut next_event = 0;
@@ -412,9 +394,9 @@ impl PluginLogic for Synth {
                 }
                 match &event.body {
                     EventBody::NoteOn { note, velocity, .. } => {
-                        engine.note_on(&settings, *note, f64::from(norm_7bit(*velocity)));
+                        engine.note_on(settings, *note, f64::from(norm_7bit(*velocity)));
                     }
-                    EventBody::NoteOff { note, .. } => engine.note_off(&settings, *note),
+                    EventBody::NoteOff { note, .. } => engine.note_off(settings, *note),
                     EventBody::PitchBend { value, .. } => {
                         engine.set_pitch_bend(f64::from(norm_pitch_bend(*value)));
                     }
@@ -422,15 +404,15 @@ impl PluginLogic for Synth {
                         engine.set_mod_wheel(f64::from(norm_7bit(*value)));
                     }
                     EventBody::ControlChange { cc: 64, value, .. } => {
-                        engine.sustain_pedal(&settings, norm_7bit(*value) >= 0.5);
+                        engine.sustain_pedal(settings, norm_7bit(*value) >= 0.5);
                     }
-                    EventBody::ControlChange { cc: 123, .. } => engine.all_notes_off(&settings),
+                    EventBody::ControlChange { cc: 123, .. } => engine.all_notes_off(settings),
                     _ => {}
                 }
                 next_event += 1;
             }
 
-            let (l, r) = engine.process_frame(&settings);
+            let (l, r) = engine.process_frame(settings);
             buffer.output(0)[i] = l;
             if out_channels > 1 {
                 buffer.output(1)[i] = r;
@@ -498,7 +480,7 @@ impl PluginLogic for Synth {
                 ],
             ),
         ])
-        .with_title("GRAIN POLY")
+        .with_title("VAGUS")
         .into_editor(&params)
     }
 }

@@ -1,9 +1,11 @@
-
 //! The complete polysynth with no plugin framework dependency.
 //!
 //! The plugin layer in lib.rs only translates host parameters and MIDI into
 //! calls on `Engine`, which keeps all of the DSP testable on its own.
 
+use truce::params::FloatParamReadF64;
+
+use crate::SynthParams;
 use crate::corpus::Corpus;
 use crate::fdn::{Fdn, FdnSettings};
 use crate::grain::CloudSettings;
@@ -25,7 +27,7 @@ pub struct EngineSettings {
     /// Linear gain.
     pub volume: f64,
     /// MIDI note at which the file plays at its original pitch.
-    pub root: f64,
+    pub root: u8,
     /// 0 keeps grains at original pitch, 1 tracks the keyboard.
     pub follow: f64,
     pub attack: f64,
@@ -42,7 +44,7 @@ impl Default for EngineSettings {
             cutoff: 8000.0,
             resonance: 0.0,
             volume: 0.5,
-            root: 60.0,
+            root: 60,
             follow: 1.0,
             attack: 0.01,
             decay: 0.1,
@@ -51,6 +53,37 @@ impl Default for EngineSettings {
             cloud: CloudSettings::default(),
             fdn: FdnSettings::default(),
         }
+    }
+}
+
+impl EngineSettings {
+    /// Everything that does not change inside a block. Read once per block.
+    pub fn update_block_settings(&mut self, p: &SynthParams) {
+        self.root = p
+            .source
+            .root
+            .value()
+            .try_into()
+            .expect("Invalid  MIDI note");
+        self.follow = p.grains.follow.value();
+        self.attack = p.envelope.attack.value();
+        self.decay = p.envelope.decay.value();
+        self.sustain = p.envelope.sustain.value();
+        self.release = p.envelope.release.value();
+
+        self.cloud.spread = p.grains.spread.value();
+        self.cloud.grain_s = p.grains.size.value() * 0.001;
+        self.cloud.density = p.grains.density.value();
+        self.cloud.detune_cents = p.grains.detune.value();
+        self.cloud.width = p.grains.width.value();
+        self.cloud.focus = p.grains.focus.value().round().max(1.0) as u32;
+
+        self.fdn.memory_s = p.memory.length.value();
+        self.fdn.grain_s = p.memory.grain.value() * 0.001;
+        self.fdn.shift_semi = p.memory.shift.value();
+        self.fdn.tone = p.memory.tone.value();
+        self.fdn.focus = p.memory.focus.value().round().max(1.0) as u32;
+        self.fdn.damp_hz = p.memory.damp.value();
     }
 }
 
@@ -153,15 +186,26 @@ impl Engine {
     pub fn note_on(&mut self, s: &EngineSettings, note: u8, velocity: f64) {
         let idx = self.alloc_voice();
         self.serial += 1;
-        let base_ratio = (((note as f64 - s.root) * s.follow) / 12.0).exp2();
+        let base_ratio = (((note - s.root) as f64 * s.follow) / 12.0).exp2();
         let serial = self.serial;
         let sr = self.sr;
-        self.voices[idx].start(note, velocity, serial, base_ratio, (s.attack, s.decay, s.sustain), sr);
+        self.voices[idx].start(
+            note,
+            velocity,
+            serial,
+            base_ratio,
+            (s.attack, s.decay, s.sustain),
+            sr,
+        );
     }
 
     pub fn note_off(&mut self, s: &EngineSettings, note: u8) {
         let (pedal, sr) = (self.pedal, self.sr);
-        for v in self.voices.iter_mut().filter(|v| v.active && v.note == note && v.key_down) {
+        for v in self
+            .voices
+            .iter_mut()
+            .filter(|v| v.active && v.note == note && v.key_down)
+        {
             v.key_down = false;
             if !pedal {
                 v.release(s.release, sr);
@@ -173,7 +217,11 @@ impl Engine {
         self.pedal = down;
         if !down {
             let sr = self.sr;
-            for v in self.voices.iter_mut().filter(|v| v.active && !v.key_down && !v.releasing) {
+            for v in self
+                .voices
+                .iter_mut()
+                .filter(|v| v.active && !v.key_down && !v.releasing)
+            {
                 v.release(s.release, sr);
             }
         }
@@ -269,7 +317,12 @@ mod tests {
         }
         assert_eq!(e.active_voices(), MAX_VOICES);
         // Newest notes survive, oldest were stolen.
-        let alive: Vec<u8> = e.voices.iter().filter(|v| v.active).map(|v| v.note).collect();
+        let alive: Vec<u8> = e
+            .voices
+            .iter()
+            .filter(|v| v.active)
+            .map(|v| v.note)
+            .collect();
         assert!(alive.contains(&69) && !alive.contains(&40));
         let out = render(&mut e, &s, 4096);
         assert!(out.iter().all(|(l, r)| l.abs() <= 1.0 && r.abs() <= 1.0));
@@ -301,7 +354,9 @@ mod tests {
 
     fn crossings(e: &mut Engine, s: &EngineSettings) -> f64 {
         let out = render(e, s, 44100);
-        out.windows(2).filter(|w| (w[0].0 >= 0.0) != (w[1].0 >= 0.0)).count() as f64
+        out.windows(2)
+            .filter(|w| (w[0].0 >= 0.0) != (w[1].0 >= 0.0))
+            .count() as f64
     }
 
     fn quiet_settings() -> EngineSettings {
@@ -327,14 +382,21 @@ mod tests {
         let up = crossings(&mut bent, &s);
         assert!(up > base * 1.08, "bend up {up} vs {base}");
 
-        let mut nofollow = EngineSettings { follow: 0.0, ..s.clone() };
+        let mut nofollow = EngineSettings {
+            follow: 0.0,
+            ..s.clone()
+        };
         nofollow.follow = 0.0;
         let mut a = sine_engine();
         a.set_pitch_bend(1.0);
         a.note_on(&nofollow, 72, 0.9);
         let mut b = sine_engine();
         b.note_on(&nofollow, 48, 0.9);
-        assert_eq!(crossings(&mut a, &nofollow), crossings(&mut b, &nofollow), "follow 0 ignores keys and bend");
+        assert_eq!(
+            crossings(&mut a, &nofollow),
+            crossings(&mut b, &nofollow),
+            "follow 0 ignores keys and bend"
+        );
     }
 
     #[test]
@@ -372,7 +434,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         write_test_wav(&dir.join("tone.wav"));
-        std::env::set_var("TRUCE_GRAIN_DIR", &dir);
+        unsafe { std::env::set_var("TRUCE_GRAIN_DIR", &dir) };
 
         let mut e = Engine::new(SR);
         let s = EngineSettings::default();
