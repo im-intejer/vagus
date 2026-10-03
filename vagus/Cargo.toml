@@ -40,7 +40,8 @@ truce-clap = { version = "6.3", optional = true }
 truce-vst3 = { version = "6.3", optional = true }
 truce-standalone = { version = "6.3", features = ["gui"], optional = true }
 clap-sys = { version = "0.5", optional = true }
-rand = "0.10.3"
+crossbeam-queue = "0.3.14"
+symphonia = "0.6.1"
 
 # Custom profile for `cargo truce install --shell`. The shell-mode
 # build (`cargo build --profile shell --features ...,shell`) lands the
