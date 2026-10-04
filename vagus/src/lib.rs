@@ -14,8 +14,6 @@ use std::sync::Arc;
 
 use truce::core::midi::{norm_7bit, norm_pitch_bend};
 use truce::prelude64::*;
-use truce_gui::IntoLayoutEditor;
-use truce_gui_types::layout::{GridLayout, knob, section};
 
 pub mod corpus;
 pub mod engine;
@@ -23,11 +21,39 @@ pub mod fdn;
 pub mod grain;
 pub mod library;
 pub mod loader;
+pub mod ui;
 pub mod util;
 pub mod voice;
 
 use engine::{Engine, EngineSettings};
 
+use truce_egui::EguiEditor;
+use truce_egui::theme::{HEADER_BG, HEADER_TEXT};
+use truce_egui::widgets::{level_meter, param_knob, param_xy_pad};
+use truce_font::JETBRAINS_MONO;
+use truce_gui::IntoLayoutEditor;
+use truce_gui_types::layout::{GridLayout, knob, section};
+// Resize demo: the header strip stays a fixed 30 px tall and the
+// central panel (knob row + XY pad + meter) fills the remaining
+// area, growing with the window. Pickable defaults; the meter
+// stretches vertically with the window while the knob row + XY
+// pad stay at their natural sizes.
+const WINDOW_W: u32 = 176;
+const WINDOW_H: u32 = 290;
+// Two 60 px knobs + 10 px gap = 130 px; plus a 16 px meter,
+// 10 px meter-to-column gap, and 10 px padding on each side =
+// 176 px - the smallest width where the XY pad column matches
+// the knob row above.
+const MIN_W: u32 = 176;
+const MIN_H: u32 = 260;
+const MAX_W: u32 = 1200;
+const MAX_H: u32 = 900;
+// Layout constants shared between width measurements and the
+// render pass.
+const METER_W: f32 = 16.0;
+const GAP: f32 = 10.0;
+const KNOB_W: f32 = 60.0;
+const KNOB_GAP: f32 = 10.0;
 // --- Parameters ---
 
 #[derive(Params)]
@@ -36,10 +62,10 @@ pub struct SourceParams {
         name = "Sample",
         short_name = "Sample",
         group = "Source",
-        range = "linear(0, 9999)",
-        default = 0.0
+        range = "linear(0, 128)",
+        default = 0
     )]
-    pub sample: FloatParam,
+    pub sample: IntParam,
 
     #[param(
         name = "Root Note",
@@ -373,7 +399,7 @@ impl PluginLogic for Synth {
         let settings = &mut state.settings;
         settings.update_block_settings(params);
 
-        engine.begin_block(params.source.sample.value().round() as i64);
+        engine.begin_block(params.source.sample.value());
 
         let mut next_event = 0;
         let out_channels = buffer.num_output_channels();
@@ -483,6 +509,16 @@ impl PluginLogic for Synth {
         .with_title("VAGUS")
         .into_editor(&params)
     }
+
+    // fn editor(params: Arc<SynthParams>) -> Box<dyn Editor> {
+    //     EguiEditor::new(params.clone(), (WINDOW_W, WINDOW_H), ui::editor_ui)
+    //         .with_visuals(truce_egui::theme::dark())
+    //         .with_font(JETBRAINS_MONO)
+    //         .resizable(true)
+    //         .min_size((MIN_W, MIN_H))
+    //         .max_size((MAX_W, MAX_H))
+    //         .into_editor()
+    // }
 }
 
 truce::plugin! {

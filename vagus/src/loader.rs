@@ -34,7 +34,7 @@ pub fn sample_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
-    PathBuf::from(home).join("TruceGrain")
+    PathBuf::from(home).join("Vagus").join("Samples")
 }
 
 /// Decode any supported file to mono f32. Returns (samples, sample_rate).
