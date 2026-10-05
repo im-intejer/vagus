@@ -1,6 +1,3 @@
-use truce::core::PluginContext;
-use truce_egui::theme::{HEADER_BG, HEADER_TEXT};
-
 // pub fn editor_ui<'a, 'b>(ui: &'a mut egui::Ui, state: &'b PluginContext<SynthParams>) {
 //     egui::Panel::top("header")
 //         .exact_size(30.0)

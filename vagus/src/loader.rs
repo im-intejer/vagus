@@ -73,6 +73,7 @@ pub fn decode_file(path: &Path) -> Result<(Vec<f32>, f64), String> {
         .channels
         .as_ref()
         .map_or_else(|| 1u16, |channels| channels.count() as u16);
+
     let mut scratch: Vec<f32> = vec![];
     let mut samples: Vec<f32> = vec![];
     let mut total_sample_count = 0;

@@ -74,6 +74,7 @@ impl EngineSettings {
         self.cloud.spread = p.grains.spread.value();
         self.cloud.grain_s = p.grains.size.value() * 0.001;
         self.cloud.density = p.grains.density.value();
+        self.cloud.timing_jitter = p.grains.jitter.value();
         self.cloud.detune_cents = p.grains.detune.value();
         self.cloud.width = p.grains.width.value();
         self.cloud.focus = p.grains.focus.value().round().max(1.0) as u32;

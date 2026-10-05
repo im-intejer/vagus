@@ -36,6 +36,9 @@ pub struct CloudSettings {
     pub tone: f64,
     /// Tournament size. 1 is random, higher locks onto the targets.
     pub focus: u32,
+    /// Randomness of grain onset timing, 0..1. 0 is perfectly regular,
+    /// 1 is fully random (exponentially distributed gaps, like rain).
+    pub timing_jitter: f64,
 }
 
 impl Default for CloudSettings {
@@ -49,8 +52,26 @@ impl Default for CloudSettings {
             width: 0.5,
             tone: 0.5,
             focus: 4,
+            timing_jitter: 0.35,
         }
     }
+}
+
+/// Samples until the next grain onset.
+///
+/// The mean gap is always `grain_len / density`, so Density keeps its meaning
+/// at every jitter setting. The jitter blends a fixed gap (0) with an
+/// exponentially distributed gap (1), which is what a Poisson process, the
+/// statistics of rain, produces. Gaps are capped at 6x the mean so one unlucky
+/// draw cannot leave a long hole.
+pub fn next_interval(grain_len: f64, density: f64, jitter: f64, rng: &mut Rng) -> f64 {
+    let mean = grain_len / density.max(0.1);
+    let j = jitter.clamp(0.0, 1.0);
+    if j <= 0.0 {
+        return mean;
+    }
+    let expo = (-(1.0 - rng.unit()).ln()).min(6.0);
+    mean * ((1.0 - j) + j * expo)
 }
 
 pub struct GrainCloud {
@@ -93,7 +114,7 @@ impl GrainCloud {
         self.countdown -= 1.0;
         if self.countdown <= 0.0 {
             let len = (s.grain_s * sr).max(32.0);
-            self.countdown += len / s.density.max(0.1) * (0.75 + 0.5 * rng.unit());
+            self.countdown += next_interval(len, s.density, s.timing_jitter, rng);
             if !corpus.is_empty() {
                 self.spawn(corpus, s, ratio, target_loud, sr, len as u32, rng);
             }
@@ -209,6 +230,86 @@ mod tests {
         };
         let r = run(2.0) / run(1.0);
         assert!((1.7..2.3).contains(&r), "crossing ratio {r}");
+    }
+
+    #[test]
+    fn zero_jitter_is_perfectly_regular() {
+        let mut rng = Rng::new(5);
+        for _ in 0..100 {
+            assert_eq!(next_interval(4410.0, 3.0, 0.0, &mut rng), 1470.0);
+        }
+    }
+
+    #[test]
+    fn jitter_keeps_mean_and_widens_spread() {
+        let stats = |j: f64| {
+            let mut rng = Rng::new(11);
+            let v: Vec<f64> = (0..50_000)
+                .map(|_| next_interval(4410.0, 3.0, j, &mut rng))
+                .collect();
+            let mean = v.iter().sum::<f64>() / v.len() as f64;
+            let var = v.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / v.len() as f64;
+            assert!(v.iter().all(|x| *x >= 0.0 && x.is_finite()));
+            (mean, var.sqrt() / mean)
+        };
+        let (m0, _) = stats(0.0);
+        let (m5, cv5) = stats(0.5);
+        let (m1, cv1) = stats(1.0);
+        for m in [m0, m5, m1] {
+            assert!((m / 1470.0 - 1.0).abs() < 0.03, "mean drifted to {m}");
+        }
+        assert!(
+            cv5 > 0.3 && cv1 > cv5,
+            "spread should grow, cv {cv5} then {cv1}"
+        );
+    }
+
+    #[test]
+    fn regular_timing_produces_steady_pulse() {
+        // Density 1 with zero jitter means one grain per grain length, so the
+        // output energy repeats with that period.
+        let sr = 44100.0;
+        let sine: Vec<f32> = (0..44100 * 2)
+            .map(|i| (std::f64::consts::TAU * 200.0 * i as f64 / sr).sin() as f32)
+            .collect();
+        let corpus = Corpus::from_mono("sine", sine, sr);
+        let env = |jitter: f64| {
+            let mut cloud = GrainCloud::new();
+            let mut rng = Rng::new(2);
+            let s = CloudSettings {
+                grain_s: 0.05,
+                density: 1.0,
+                timing_jitter: jitter,
+                detune_cents: 0.0,
+                spread: 0.5,
+                ..Default::default()
+            };
+            // energy per 5 ms block
+            let mut blocks = Vec::new();
+            let mut e = 0.0;
+            for i in 0..44100 {
+                let (l, r) = cloud.render(&corpus, &s, 1.0, 0.8, sr, &mut rng);
+                e += l * l + r * r;
+                if (i + 1) % 220 == 0 {
+                    blocks.push(e);
+                    e = 0.0;
+                }
+            }
+            let mean = blocks.iter().sum::<f64>() / blocks.len() as f64;
+            blocks
+                .iter()
+                .map(|b| (b - mean) * (b - mean))
+                .sum::<f64>()
+                .sqrt()
+                / mean
+        };
+        // Both are bursty at density 1, but random timing is clearly more uneven.
+        assert!(
+            env(1.0) > env(0.0) * 1.1,
+            "random {} regular {}",
+            env(1.0),
+            env(0.0)
+        );
     }
 
     #[test]

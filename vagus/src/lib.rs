@@ -1,5 +1,3 @@
-// Granular polysynth for truce.
-//
 // Each voice is a grain cloud reading from an imported audio file. The summed
 // voices excite an eight line self-resampling grain FDN. All DSP lives in the
 // framework-free modules below. This file only maps parameters and MIDI onto
@@ -27,33 +25,9 @@ pub mod voice;
 
 use engine::{Engine, EngineSettings};
 
-use truce_egui::EguiEditor;
-use truce_egui::theme::{HEADER_BG, HEADER_TEXT};
-use truce_egui::widgets::{level_meter, param_knob, param_xy_pad};
-use truce_font::JETBRAINS_MONO;
 use truce_gui::IntoLayoutEditor;
 use truce_gui_types::layout::{GridLayout, knob, section};
-// Resize demo: the header strip stays a fixed 30 px tall and the
-// central panel (knob row + XY pad + meter) fills the remaining
-// area, growing with the window. Pickable defaults; the meter
-// stretches vertically with the window while the knob row + XY
-// pad stay at their natural sizes.
-const WINDOW_W: u32 = 176;
-const WINDOW_H: u32 = 290;
-// Two 60 px knobs + 10 px gap = 130 px; plus a 16 px meter,
-// 10 px meter-to-column gap, and 10 px padding on each side =
-// 176 px - the smallest width where the XY pad column matches
-// the knob row above.
-const MIN_W: u32 = 176;
-const MIN_H: u32 = 260;
-const MAX_W: u32 = 1200;
-const MAX_H: u32 = 900;
-// Layout constants shared between width measurements and the
-// render pass.
-const METER_W: f32 = 16.0;
-const GAP: f32 = 10.0;
-const KNOB_W: f32 = 60.0;
-const KNOB_GAP: f32 = 10.0;
+
 // --- Parameters ---
 
 #[derive(Params)]
@@ -117,6 +91,15 @@ pub struct GrainParams {
         default = 3.0
     )]
     pub density: FloatParam,
+
+    #[param(
+        name = "Timing Jitter",
+        short_name = "Jitter",
+        group = "Grains",
+        range = "linear(0, 1)",
+        default = 0.35
+    )]
+    pub jitter: FloatParam,
 
     #[param(
         name = "Detune",
@@ -469,6 +452,7 @@ impl PluginLogic for Synth {
                     knob(params.grains.spread.id(), "Spread"),
                     knob(params.grains.size.id(), "Size"),
                     knob(params.grains.density.id(), "Density"),
+                    knob(params.grains.jitter.id(), "Jitter"),
                     knob(params.grains.detune.id(), "Detune"),
                     knob(params.grains.follow.id(), "Follow"),
                     knob(params.grains.width.id(), "Width"),
