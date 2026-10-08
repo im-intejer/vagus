@@ -1,6 +1,9 @@
 //! Per-voice grain cloud that reads from an imported (or built-in) corpus.
 
+use truce::params::FloatParamReadF64;
+
 use crate::corpus::{Corpus, HOP};
+use crate::engine::Settings;
 use crate::util::{Rng, hann};
 use std::f64::consts::FRAC_PI_4;
 
@@ -8,32 +11,32 @@ pub const MAX_GRAINS: usize = 24;
 
 #[derive(Clone, Copy, Default)]
 struct Grain {
-    pos: f64,
-    inc: f64,
+    position: f64,
+    increment: f64,
     age: u32,
-    len: u32,
-    gl: f64,
-    gr: f64,
-    on: bool,
+    length: u32,
+    gain_left: f64,
+    gain_right: f64,
+    is_on: bool,
 }
 
 /// Settings shared by every voice's cloud.
 #[derive(Clone, Copy, Debug)]
 pub struct CloudSettings {
     /// Grain length in seconds.
-    pub grain_s: f64,
+    pub grain_length_s: f64,
     /// Average number of overlapping grains.
     pub density: f64,
     /// Scan position in the file, 0..1.
-    pub position: f64,
+    pub start_position_percent: f64,
     /// Width of the window grains are drawn from, 0..1.
-    pub spread: f64,
+    pub start_position_spread: f64,
     /// Random pitch scatter per grain in cents.
     pub detune_cents: f64,
     /// Stereo scatter, 0..1.
-    pub width: f64,
+    pub stereo_width: f64,
     /// Brightness target for descriptor selection, 0..1.
-    pub tone: f64,
+    pub brightness: f64,
     /// Tournament size. 1 is random, higher locks onto the targets.
     pub focus: u32,
     /// Randomness of grain onset timing, 0..1. 0 is perfectly regular,
@@ -44,16 +47,32 @@ pub struct CloudSettings {
 impl Default for CloudSettings {
     fn default() -> Self {
         CloudSettings {
-            grain_s: 0.08,
+            grain_length_s: 0.08,
             density: 3.0,
-            position: 0.3,
-            spread: 0.2,
+            start_position_percent: 0.3,
+            start_position_spread: 0.2,
             detune_cents: 8.0,
-            width: 0.5,
-            tone: 0.5,
+            stereo_width: 0.5,
+            brightness: 0.5,
             focus: 4,
             timing_jitter: 0.35,
         }
+    }
+}
+
+impl Settings for CloudSettings {
+    fn update_block_settings(
+        &mut self,
+        p: &crate::SynthParams,
+        _transport: &truce::prelude::TransportInfo,
+    ) {
+        self.start_position_spread = p.grains.spread.value();
+        self.grain_length_s = p.grains.size.value() * 0.001;
+        self.density = p.grains.density.value();
+        self.timing_jitter = p.grains.jitter.value();
+        self.detune_cents = p.grains.detune.value();
+        self.stereo_width = p.grains.width.value();
+        self.focus = p.grains.focus.value().round().max(1.0) as u32;
     }
 }
 
@@ -95,7 +114,7 @@ impl GrainCloud {
 
     pub fn reset(&mut self) {
         for g in self.grains.iter_mut() {
-            g.on = false;
+            g.is_on = false;
         }
         self.countdown = 0.0;
     }
@@ -113,7 +132,7 @@ impl GrainCloud {
     ) -> (f64, f64) {
         self.countdown -= 1.0;
         if self.countdown <= 0.0 {
-            let len = (s.grain_s * sr).max(32.0);
+            let len = (s.grain_length_s * sr).max(32.0);
             self.countdown += next_interval(len, s.density, s.timing_jitter, rng);
             if !corpus.is_empty() {
                 self.spawn(corpus, s, ratio, target_loud, sr, len as u32, rng);
@@ -123,18 +142,18 @@ impl GrainCloud {
         let n = corpus.len() as f64;
         let (mut l, mut r) = (0.0, 0.0);
         for g in self.grains.iter_mut() {
-            if !g.on {
+            if !g.is_on {
                 continue;
             }
-            if g.age >= g.len || g.pos < 0.0 || g.pos >= n {
-                g.on = false;
+            if g.age >= g.length || g.position < 0.0 || g.position >= n {
+                g.is_on = false;
                 continue;
             }
-            let w = hann(g.age as f64 / g.len as f64);
-            let x = corpus.read(g.pos) * w;
-            l += x * g.gl;
-            r += x * g.gr;
-            g.pos += g.inc;
+            let w = hann(g.age as f64 / g.length as f64);
+            let x = corpus.read(g.position) * w;
+            l += x * g.gain_left;
+            r += x * g.gain_right;
+            g.position += g.increment;
             g.age += 1;
         }
         (l, r)
@@ -144,48 +163,50 @@ impl GrainCloud {
     fn spawn(
         &mut self,
         corpus: &Corpus,
-        s: &CloudSettings,
+        cloud_settings: &CloudSettings,
         ratio: f64,
-        target_loud: f64,
-        sr: f64,
-        len: u32,
+        target_loudness: f64,
+        engine_sample_rate: f64,
+        length: u32,
         rng: &mut Rng,
     ) {
-        let Some(slot) = self.grains.iter_mut().find(|g| !g.on) else {
+        let Some(slot) = self.grains.iter_mut().find(|g| !g.is_on) else {
             return;
         };
         let idx = corpus.choose(
-            s.position,
-            s.spread,
-            s.focus,
-            s.tone as f32,
-            target_loud as f32,
+            cloud_settings.start_position_percent,
+            cloud_settings.start_position_spread,
+            cloud_settings.focus,
+            cloud_settings.brightness as f32,
+            target_loudness as f32,
             rng,
         );
         let start = (idx * HOP + rng.below(HOP)) as f64;
-        let detune = (rng.bipolar() * s.detune_cents / 1200.0).exp2();
-        let pan = rng.bipolar() * s.width;
+        let detune = (rng.bipolar() * cloud_settings.detune_cents / 1200.0).exp2();
+        let pan = rng.bipolar() * cloud_settings.stereo_width;
         let angle = (pan + 1.0) * FRAC_PI_4;
-        let gain = 1.0 / s.density.max(1.0).sqrt();
+        let gain = 1.0 / cloud_settings.density.max(1.0).sqrt();
         *slot = Grain {
-            pos: start,
-            inc: ratio * detune * corpus.sample_rate / sr,
+            position: start,
+            increment: ratio * detune * corpus.sample_rate / engine_sample_rate,
             age: 0,
-            len,
-            gl: angle.cos() * gain,
-            gr: angle.sin() * gain,
-            on: true,
+            length,
+            gain_left: angle.cos() * gain,
+            gain_right: angle.sin() * gain,
+            is_on: true,
         };
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::tests::TEST_SAMPLE_RATE;
+
     use super::*;
 
     #[test]
     fn cloud_makes_bounded_finite_sound() {
-        let corpus = Corpus::builtin();
+        let corpus = Corpus::builtin(TEST_SAMPLE_RATE);
         let mut cloud = GrainCloud::new();
         let mut rng = Rng::new(9);
         let s = CloudSettings::default();
@@ -214,7 +235,7 @@ mod tests {
             let s = CloudSettings {
                 detune_cents: 0.0,
                 density: 2.0,
-                spread: 0.5,
+                start_position_spread: 0.5,
                 ..Default::default()
             };
             let mut prev = 0.0;
@@ -277,11 +298,11 @@ mod tests {
             let mut cloud = GrainCloud::new();
             let mut rng = Rng::new(2);
             let s = CloudSettings {
-                grain_s: 0.05,
+                grain_length_s: 0.05,
                 density: 1.0,
                 timing_jitter: jitter,
                 detune_cents: 0.0,
-                spread: 0.5,
+                start_position_spread: 0.5,
                 ..Default::default()
             };
             // energy per 5 ms block

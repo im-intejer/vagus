@@ -3,6 +3,7 @@
 //! The plugin layer in lib.rs only translates host parameters and MIDI into
 //! calls on `Engine`, which keeps all of the DSP testable on its own.
 
+use truce::core::TransportInfo;
 use truce::params::FloatParamReadF64;
 
 use crate::SynthParams;
@@ -56,9 +57,13 @@ impl Default for EngineSettings {
     }
 }
 
-impl EngineSettings {
+pub trait Settings {
+    fn update_block_settings(&mut self, p: &SynthParams, transport: &TransportInfo);
+}
+
+impl Settings for EngineSettings {
     /// Everything that does not change inside a block. Read once per block.
-    pub fn update_block_settings(&mut self, p: &SynthParams) {
+    fn update_block_settings(&mut self, p: &SynthParams, transport: &TransportInfo) {
         self.root = p
             .source
             .root
@@ -71,20 +76,9 @@ impl EngineSettings {
         self.sustain = p.envelope.sustain.value();
         self.release = p.envelope.release.value();
 
-        self.cloud.spread = p.grains.spread.value();
-        self.cloud.grain_s = p.grains.size.value() * 0.001;
-        self.cloud.density = p.grains.density.value();
-        self.cloud.timing_jitter = p.grains.jitter.value();
-        self.cloud.detune_cents = p.grains.detune.value();
-        self.cloud.width = p.grains.width.value();
-        self.cloud.focus = p.grains.focus.value().round().max(1.0) as u32;
+        self.cloud.update_block_settings(p, transport);
 
-        self.fdn.memory_s = p.memory.length.value();
-        self.fdn.grain_s = p.memory.grain.value() * 0.001;
-        self.fdn.shift_semi = p.memory.shift.value();
-        self.fdn.tone = p.memory.tone.value();
-        self.fdn.focus = p.memory.focus.value().round().max(1.0) as u32;
-        self.fdn.damp_hz = p.memory.damp.value();
+        self.fdn.update_block_settings(p, transport);
     }
 }
 
@@ -103,17 +97,17 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(sr: f64) -> Self {
-        let builtin = Arc::new(Corpus::builtin());
+    pub fn new(sample_rate: f64) -> Self {
+        let builtin = Arc::new(Corpus::builtin(sample_rate));
         let loader = Loader::spawn(builtin.clone());
         Engine {
-            sr,
+            sr: sample_rate,
             voices: (0..MAX_VOICES).map(|_| Voice::new()).collect(),
             serial: 0,
             corpus: builtin,
             loader,
             last_slot: 0,
-            fdn: Fdn::new(sr),
+            fdn: Fdn::new(sample_rate),
             pedal: false,
             bend_mult: 1.0,
             mod_wheel: 0.0,
@@ -165,7 +159,8 @@ impl Engine {
     }
 
     pub fn set_mod_wheel(&mut self, v: f64) {
-        self.mod_wheel = v.clamp(0.0, 1.0);
+        debug_assert!((0.0..=1.0).contains(&v));
+        self.mod_wheel = v;
     }
 
     fn alloc_voice(&self) -> usize {
@@ -366,7 +361,7 @@ mod tests {
         s.cutoff = 20000.0;
         s.cloud.density = 2.0;
         s.cloud.detune_cents = 0.0;
-        s.cloud.spread = 0.5;
+        s.cloud.start_position_spread = 0.5;
         s
     }
 

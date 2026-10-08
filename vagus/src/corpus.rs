@@ -143,23 +143,28 @@ impl Corpus {
         &self,
         center: f64,
         spread: f64,
-        k: u32,
-        target_bright: f32,
-        target_loud: f32,
+        focus_strength: u32,
+        target_brightness: f32,
+        target_loudness: f32,
         rng: &mut Rng,
     ) -> usize {
-        let n = self.slots.len();
-        let half = (spread.clamp(0.0, 1.0) * 0.5 * n as f64).max(1.0);
-        let c = center.clamp(0.0, 1.0) * n as f64;
-        let lo = ((c - half).floor().max(0.0) as usize).min(n - 1);
-        let hi = (((c + half).ceil()) as usize).min(n).max(lo + 1);
+        debug_assert!((0.0..=1.0).contains(&spread));
+        debug_assert!((0.0..=1.0).contains(&center));
+
+        let number_of_slots = self.slots.len();
+        let half = (spread * 0.5 * number_of_slots as f64).max(1.0);
+        let c = center * number_of_slots as f64;
+        let lo = ((c - half).floor().max(0.0) as usize).min(number_of_slots - 1);
+        let hi = (((c + half).ceil()) as usize)
+            .min(number_of_slots)
+            .max(lo + 1);
         let mut best = lo;
         let mut best_cost = f32::MAX;
-        for _ in 0..k.max(1) {
+        for _ in 0..focus_strength.max(1) {
             let s = lo + rng.below(hi - lo);
             let sl = self.slots[s];
-            let db = sl.bright - target_bright;
-            let dl = sl.loud - target_loud;
+            let db = sl.bright - target_brightness;
+            let dl = sl.loud - target_loudness;
             let cost = db * db + 0.5 * dl * dl;
             if cost < best_cost {
                 best_cost = cost;
@@ -172,10 +177,9 @@ impl Corpus {
     /// A small procedural corpus so the synth makes sound before any file is
     /// imported. It sweeps from dark to bright over time, so the Position
     /// and Tone controls have something meaningful to select between.
-    pub fn builtin() -> Self {
-        let sr = 44100.0f64;
+    pub fn builtin(sample_rate: f64) -> Self {
         let secs = 4.0;
-        let n = (sr * secs) as usize;
+        let n = (sample_rate * secs) as usize;
         let mut out = Vec::with_capacity(n);
         let mut rng = Rng::new(12345);
         let f0 = 110.0;
@@ -184,7 +188,7 @@ impl Corpus {
         for i in 0..n {
             let u = i as f64 / n as f64;
             let limit = 1.0 + 22.0 * u * u;
-            phase += f0 * (1.0 + 0.003 * (TAU * 0.7 * u * secs).sin()) / sr;
+            phase += f0 * (1.0 + 0.003 * (TAU * 0.7 * u * secs).sin()) / sample_rate;
             if phase >= 1.0 {
                 phase -= 1.0;
             }
@@ -200,12 +204,14 @@ impl Corpus {
             s += (rng.bipolar() - 0.6 * lp) * 0.35 * u * pulse;
             out.push(s as f32);
         }
-        Corpus::from_mono("Built-in", out, sr)
+        Corpus::from_mono("Built-in", out, sample_rate)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::tests::TEST_SAMPLE_RATE;
+
     use super::*;
 
     fn sine(f: f64, sr: f64, n: usize) -> Vec<f32> {
@@ -281,7 +287,7 @@ mod tests {
 
     #[test]
     fn builtin_has_range() {
-        let c = Corpus::builtin();
+        let c = Corpus::builtin(TEST_SAMPLE_RATE);
         assert!(c.slots.first().unwrap().bright < c.slots.last().unwrap().bright);
         assert!(c.samples.iter().all(|s| s.is_finite()));
     }

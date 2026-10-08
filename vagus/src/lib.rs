@@ -375,12 +375,12 @@ impl PluginLogic for Synth {
         params: &SynthParams,
         buffer: &mut AudioBuffer,
         events: &EventList,
-        _context: &mut ProcessContext,
+        context: &mut ProcessContext,
     ) -> ProcessStatus {
         let engine = &mut state.engine;
 
         let settings = &mut state.settings;
-        settings.update_block_settings(params);
+        settings.update_block_settings(params, context.transport);
 
         engine.begin_block(params.source.sample.value());
 
@@ -392,8 +392,8 @@ impl PluginLogic for Synth {
             settings.cutoff = params.filter.cutoff.read();
             settings.resonance = params.filter.resonance.read();
             settings.volume = db_to_linear(params.volume.read());
-            settings.cloud.position = params.grains.position.read();
-            settings.cloud.tone = params.grains.tone.read();
+            settings.cloud.start_position_percent = params.grains.position.read();
+            settings.cloud.brightness = params.grains.tone.read();
             settings.fdn.mix = params.memory.mix.read();
             settings.fdn.feedback = params.memory.feedback.read();
 
@@ -514,6 +514,9 @@ truce::enable_rt_paranoid!();
 
 #[cfg(test)]
 mod tests {
+
+    pub const TEST_SAMPLE_RATE: f64 = 44100.0;
+
     use super::*;
 
     #[test]

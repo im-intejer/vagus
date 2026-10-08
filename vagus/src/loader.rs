@@ -254,6 +254,8 @@ pub mod tests_support {
 
 #[cfg(test)]
 mod tests {
+    use crate::tests::TEST_SAMPLE_RATE;
+
     use super::*;
     use std::time::Instant;
 
@@ -330,7 +332,7 @@ mod tests {
         write_wav(&d.join("one.wav"), 44100, 1, &frames);
         unsafe { std::env::set_var("TRUCE_GRAIN_DIR", &d) };
 
-        let builtin = Arc::new(Corpus::builtin());
+        let builtin = Arc::new(Corpus::builtin(TEST_SAMPLE_RATE));
         let loader = Loader::spawn(builtin.clone());
         loader.request_slot(1);
 

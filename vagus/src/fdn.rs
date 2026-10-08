@@ -5,7 +5,10 @@
 //! through a small grain scheduler. Grain choice is a tournament against a
 //! brightness target, so the loop evolves toward the target each pass.
 
+use truce::params::FloatParamReadF64;
+
 use crate::corpus::{HOP, Slot, brightness};
+use crate::engine::Settings;
 use crate::util::{Rng, hann, read_wrapped};
 use std::f64::consts::TAU;
 
@@ -30,6 +33,21 @@ pub struct FdnSettings {
     pub tone: f64,
     pub focus: u32,
     pub damp_hz: f64,
+}
+
+impl Settings for FdnSettings {
+    fn update_block_settings(
+        &mut self,
+        p: &crate::SynthParams,
+        _transport: &truce::prelude::TransportInfo,
+    ) {
+        self.memory_s = p.memory.length.value();
+        self.grain_s = p.memory.grain.value() * 0.001;
+        self.shift_semi = p.memory.shift.value();
+        self.tone = p.memory.tone.value();
+        self.focus = p.memory.focus.value().round().max(1.0) as u32;
+        self.damp_hz = p.memory.damp.value();
+    }
 }
 
 impl Default for FdnSettings {
