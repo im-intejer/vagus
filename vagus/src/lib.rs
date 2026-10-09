@@ -89,7 +89,7 @@ pub struct GrainParams {
     pub size: FloatParam,
 
     /// Free uses Grain Size in ms. Any note value sizes grains from the host
-    /// tempo and locks their onsets to the beat grid.
+    /// tempo. Grains still start the moment a note is played.
     #[param(
         name = "Grain Size Sync",
         short_name = "Sync",
@@ -398,7 +398,6 @@ impl PluginLogic for Synth {
         settings.update_block_settings(params, context.transport);
 
         engine.begin_block(params.source.sample.value());
-        engine.set_transport(context.transport.playing, context.transport.position_beats);
 
         let mut next_event = 0;
         let out_channels = buffer.num_output_channels();
