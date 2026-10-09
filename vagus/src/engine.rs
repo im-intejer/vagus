@@ -9,7 +9,7 @@ use truce::params::FloatParamReadF64;
 use crate::SynthParams;
 use crate::corpus::Corpus;
 use crate::fdn::{Fdn, FdnSettings};
-use crate::grain::CloudSettings;
+use crate::grain::{self, CloudSettings};
 use crate::loader::Loader;
 use crate::voice::{SvfCoeffs, Voice};
 use std::f64::consts::TAU;
@@ -94,6 +94,9 @@ pub struct Engine {
     bend_mult: f64,
     mod_wheel: f64,
     lfo_phase: f64,
+    /// Transport position in quarter notes. Shared by every voice so beat
+    /// locked grains line up across notes.
+    beat: f64,
 }
 
 impl Engine {
@@ -112,6 +115,7 @@ impl Engine {
             bend_mult: 1.0,
             mod_wheel: 0.0,
             lfo_phase: 0.0,
+            beat: 0.0,
         }
     }
 
@@ -126,6 +130,17 @@ impl Engine {
         self.bend_mult = 1.0;
         self.mod_wheel = 0.0;
         self.lfo_phase = 0.0;
+        self.beat = 0.0;
+    }
+
+    /// Call once per block with the host transport. While the host plays, the
+    /// beat clock follows it. While stopped, the clock keeps running at the
+    /// last tempo, so beat synced grains still pulse when you play the synth
+    /// with the transport off.
+    pub fn set_transport(&mut self, playing: bool, position_beats: f64) {
+        if playing && position_beats.is_finite() {
+            self.beat = position_beats;
+        }
     }
 
     pub fn loader(&self) -> &Loader {
@@ -245,10 +260,11 @@ impl Engine {
         let corpus: &Corpus = &self.corpus;
         let (mut l, mut r) = (0.0, 0.0);
         for v in self.voices.iter_mut().filter(|v| v.active) {
-            let (a, b) = v.render(corpus, &s.cloud, &flt, pitch_mod, self.sr);
+            let (a, b) = v.render(corpus, &s.cloud, &flt, pitch_mod, self.sr, self.beat);
             l += a;
             r += b;
         }
+        self.beat += grain::usable_tempo(s.cloud.tempo_bpm) / 60.0 / self.sr;
         l *= VOICE_TRIM;
         r *= VOICE_TRIM;
 
@@ -444,5 +460,37 @@ mod tests {
         e.note_on(&s, 60, 0.9);
         let out = render(&mut e, &s, 8000);
         assert!(rms(&out) > 1e-3);
+    }
+    #[test]
+    fn synced_voices_play_on_a_shared_clock() {
+        // 1/8 grains at 120 BPM, one grain per grain length. A second note
+        // played off the beat joins the same clock and stays audible. The
+        // grid alignment itself is covered in grain.rs.
+        let mut s = quiet_settings();
+        s.cloud.sync_beats = Some(0.5);
+        s.cloud.tempo_bpm = 120.0;
+        s.cloud.density = 1.0;
+        s.cloud.timing_jitter = 0.0;
+        s.cloud.grain_length_s = grain::synced_length_s(0.5, 120.0);
+        let mut e = sine_engine();
+        e.note_on(&s, 60, 0.9);
+        render(&mut e, &s, 7000);
+        e.note_on(&s, 64, 0.9);
+        let out = render(&mut e, &s, 44100);
+        assert!(rms(&out) > 1e-3, "synced engine is silent");
+        assert!(out.iter().all(|(l, r)| l.is_finite() && r.is_finite()));
+    }
+
+    #[test]
+    fn transport_position_drives_the_beat_clock() {
+        let mut e = Engine::new(SR);
+        e.set_transport(true, 8.0);
+        assert_eq!(e.beat, 8.0);
+        // Stopped transport leaves the free running clock alone.
+        let s = EngineSettings::default();
+        e.set_transport(false, 0.0);
+        assert_eq!(e.beat, 8.0);
+        render(&mut e, &s, 44100);
+        assert!((e.beat - 10.0).abs() < 1e-6, "one second at 120 BPM adds 2 beats, got {}", e.beat);
     }
 }

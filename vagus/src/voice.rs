@@ -204,6 +204,7 @@ impl Voice {
         flt: &SvfCoeffs,
         pitch_mod: f64,
         sr: f64,
+        beat: f64,
     ) -> (f64, f64) {
         let e = self.env.tick();
         if self.env.is_done() {
@@ -213,7 +214,7 @@ impl Voice {
         let ratio = self.base_ratio * pitch_mod;
         let (l, r) = self
             .cloud
-            .render(corpus, cs, ratio, self.velocity, sr, &mut self.rng);
+            .render(corpus, cs, ratio, self.velocity, sr, beat, &mut self.rng);
         let g = e * self.gain;
         (
             self.flt[0].lowpass(l * g, flt),

@@ -197,7 +197,7 @@ impl FdnLine {
         self.acc_e += v * v;
         self.acc_d += d * d;
         self.write += 1;
-        if self.write % HOP == 0 {
+        if self.write.is_multiple_of(HOP) {
             let rms = (self.acc_e / HOP as f64).sqrt() as f32;
             let rmsd = (self.acc_d / HOP as f64).sqrt() as f32;
             let n = self.slots.len();

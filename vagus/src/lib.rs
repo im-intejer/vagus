@@ -8,6 +8,7 @@
 // the file's stable id, with 0 meaning the built-in sound. `library::import`
 // copies a file in and returns its id, which is what a drop handler sets.
 
+use crate::engine::Settings;
 use std::sync::Arc;
 
 use truce::core::midi::{norm_7bit, norm_pitch_bend};
@@ -24,9 +25,10 @@ pub mod util;
 pub mod voice;
 
 use engine::{Engine, EngineSettings};
+use grain::SizeSync;
 
 use truce_gui::IntoLayoutEditor;
-use truce_gui_types::layout::{GridLayout, knob, section};
+use truce_gui_types::layout::{GridLayout, dropdown, knob, section};
 
 // --- Parameters ---
 
@@ -73,15 +75,28 @@ pub struct GrainParams {
     )]
     pub spread: FloatParam,
 
+    #[param(name = "Sync", short_name = "Sync", group = "Grains", default = false)]
+    pub sync: BoolParam,
+
     #[param(
         name = "Grain Size",
         short_name = "Size",
         group = "Grains",
-        range = "log(10, 500)",
+        range = "skewed(0, 1000, 0.5)",
         default = 80.0,
         unit = "ms"
     )]
     pub size: FloatParam,
+
+    /// Free uses Grain Size in ms. Any note value sizes grains from the host
+    /// tempo and locks their onsets to the beat grid.
+    #[param(
+        name = "Grain Size Sync",
+        short_name = "Sync",
+        group = "Grains",
+        default = 0
+    )]
+    pub size_sync: EnumParam<SizeSync>,
 
     #[param(
         name = "Density",
@@ -383,6 +398,7 @@ impl PluginLogic for Synth {
         settings.update_block_settings(params, context.transport);
 
         engine.begin_block(params.source.sample.value());
+        engine.set_transport(context.transport.playing, context.transport.position_beats);
 
         let mut next_event = 0;
         let out_channels = buffer.num_output_channels();
@@ -451,6 +467,7 @@ impl PluginLogic for Synth {
                     knob(params.grains.position.id(), "Position"),
                     knob(params.grains.spread.id(), "Spread"),
                     knob(params.grains.size.id(), "Size"),
+                    dropdown(params.grains.size_sync.id(), "Size Sync"),
                     knob(params.grains.density.id(), "Density"),
                     knob(params.grains.jitter.id(), "Jitter"),
                     knob(params.grains.detune.id(), "Detune"),

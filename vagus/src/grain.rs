@@ -1,6 +1,7 @@
 //! Per-voice grain cloud that reads from an imported (or built-in) corpus.
 
 use truce::params::FloatParamReadF64;
+use truce::prelude64::ParamEnum;
 
 use crate::corpus::{Corpus, HOP};
 use crate::engine::Settings;
@@ -8,6 +9,76 @@ use crate::util::{Rng, hann};
 use std::f64::consts::FRAC_PI_4;
 
 pub const MAX_GRAINS: usize = 24;
+
+/// Tempo used when the host reports none, or something unusable.
+pub const FALLBACK_TEMPO_BPM: f64 = 120.0;
+
+/// Grain size note values. `Free` uses the Grain Size knob in milliseconds,
+/// every other choice follows the host tempo and locks grain onsets to the
+/// beat grid.
+#[derive(ParamEnum)]
+pub enum SizeSync {
+    Free,
+    #[name = "1/32"]
+    Div32,
+    #[name = "1/16T"]
+    Div16T,
+    #[name = "1/16"]
+    Div16,
+    #[name = "1/16D"]
+    Div16D,
+    #[name = "1/8T"]
+    Div8T,
+    #[name = "1/8"]
+    Div8,
+    #[name = "1/8D"]
+    Div8D,
+    #[name = "1/4T"]
+    Div4T,
+    #[name = "1/4"]
+    Div4,
+    #[name = "1/4D"]
+    Div4D,
+    #[name = "1/2"]
+    Div2,
+    #[name = "1 bar"]
+    Bar1,
+}
+
+impl SizeSync {
+    /// Length of the note value in quarter note beats, or `None` for Free.
+    pub fn beats(&self) -> Option<f64> {
+        Some(match self {
+            SizeSync::Free => return None,
+            SizeSync::Div32 => 0.125,
+            SizeSync::Div16T => 1.0 / 6.0,
+            SizeSync::Div16 => 0.25,
+            SizeSync::Div16D => 0.375,
+            SizeSync::Div8T => 1.0 / 3.0,
+            SizeSync::Div8 => 0.5,
+            SizeSync::Div8D => 0.75,
+            SizeSync::Div4T => 2.0 / 3.0,
+            SizeSync::Div4 => 1.0,
+            SizeSync::Div4D => 1.5,
+            SizeSync::Div2 => 2.0,
+            SizeSync::Bar1 => 4.0,
+        })
+    }
+}
+
+/// Host tempo made safe to divide by.
+pub fn usable_tempo(bpm: f64) -> f64 {
+    if bpm.is_finite() && bpm >= 1.0 {
+        bpm
+    } else {
+        FALLBACK_TEMPO_BPM
+    }
+}
+
+/// Grain length in seconds for a note value at a tempo.
+pub fn synced_length_s(beats: f64, bpm: f64) -> f64 {
+    (beats * 60.0 / usable_tempo(bpm)).clamp(0.005, 4.0)
+}
 
 #[derive(Clone, Copy, Default)]
 struct Grain {
@@ -42,6 +113,11 @@ pub struct CloudSettings {
     /// Randomness of grain onset timing, 0..1. 0 is perfectly regular,
     /// 1 is fully random (exponentially distributed gaps, like rain).
     pub timing_jitter: f64,
+    /// Grain length as a note value in beats. `Some` switches the cloud to
+    /// beat-locked onsets, `None` leaves it free-running.
+    pub sync_beats: Option<f64>,
+    /// Host tempo in beats per minute.
+    pub tempo_bpm: f64,
 }
 
 impl Default for CloudSettings {
@@ -56,6 +132,8 @@ impl Default for CloudSettings {
             brightness: 0.5,
             focus: 4,
             timing_jitter: 0.35,
+            sync_beats: None,
+            tempo_bpm: FALLBACK_TEMPO_BPM,
         }
     }
 }
@@ -64,10 +142,15 @@ impl Settings for CloudSettings {
     fn update_block_settings(
         &mut self,
         p: &crate::SynthParams,
-        _transport: &truce::prelude::TransportInfo,
+        transport: &truce::prelude::TransportInfo,
     ) {
         self.start_position_spread = p.grains.spread.value();
-        self.grain_length_s = p.grains.size.value() * 0.001;
+        self.tempo_bpm = usable_tempo(transport.tempo);
+        self.sync_beats = p.grains.size_sync.value().beats();
+        self.grain_length_s = match self.sync_beats {
+            Some(beats) => synced_length_s(beats, self.tempo_bpm),
+            None => p.grains.size.value() * 0.001,
+        };
         self.density = p.grains.density.value();
         self.timing_jitter = p.grains.jitter.value();
         self.detune_cents = p.grains.detune.value();
@@ -96,6 +179,11 @@ pub fn next_interval(grain_len: f64, density: f64, jitter: f64, rng: &mut Rng) -
 pub struct GrainCloud {
     grains: [Grain; MAX_GRAINS],
     countdown: f64,
+    /// Beat grid state, only used while the cloud is synced. Onsets sit on
+    /// multiples of `grid_step` beats and `grid_index` is the next one due.
+    grid_step: f64,
+    grid_index: i64,
+    grid_locked: bool,
 }
 
 impl Default for GrainCloud {
@@ -109,6 +197,9 @@ impl GrainCloud {
         GrainCloud {
             grains: [Grain::default(); MAX_GRAINS],
             countdown: 0.0,
+            grid_step: 1.0,
+            grid_index: 0,
+            grid_locked: false,
         }
     }
 
@@ -117,25 +208,51 @@ impl GrainCloud {
             g.is_on = false;
         }
         self.countdown = 0.0;
+        self.grid_locked = false;
     }
 
     /// Render one stereo sample.
     /// `ratio` is the playback ratio relative to the file's original pitch.
+    /// `beat` is the transport position in quarter notes at this sample. It
+    /// only matters while `s.sync_beats` is set.
     pub fn render(
         &mut self,
         corpus: &Corpus,
-        s: &CloudSettings,
+        cloud_settings: &CloudSettings,
         ratio: f64,
         target_loud: f64,
-        sr: f64,
+        sample_rate: f64,
+        beat: f64,
         rng: &mut Rng,
     ) -> (f64, f64) {
         self.countdown -= 1.0;
         if self.countdown <= 0.0 {
-            let len = (s.grain_length_s * sr).max(32.0);
-            self.countdown += next_interval(len, s.density, s.timing_jitter, rng);
-            if !corpus.is_empty() {
-                self.spawn(corpus, s, ratio, target_loud, sr, len as u32, rng);
+            let len = (cloud_settings.grain_length_s * sample_rate).max(32.0);
+            let fire = match cloud_settings.sync_beats {
+                Some(grain_beats) => {
+                    self.schedule_synced(grain_beats, cloud_settings, beat, sample_rate, rng)
+                }
+                None => {
+                    self.grid_locked = false;
+                    self.countdown += next_interval(
+                        len,
+                        cloud_settings.density,
+                        cloud_settings.timing_jitter,
+                        rng,
+                    );
+                    true
+                }
+            };
+            if fire && !corpus.is_empty() {
+                self.spawn(
+                    corpus,
+                    cloud_settings,
+                    ratio,
+                    target_loud,
+                    sample_rate,
+                    len as u32,
+                    rng,
+                );
             }
         }
 
@@ -157,6 +274,51 @@ impl GrainCloud {
             g.age += 1;
         }
         (l, r)
+    }
+
+    /// Beat locked onset scheduling. Sets `countdown` to the next onset and
+    /// returns whether a grain is due right now.
+    ///
+    /// Onsets sit on a grid of `grain_beats / density` beats, so the grain
+    /// size note value and Density together pick the rhythm, for example 1/8
+    /// at density 2 puts a grain on every 1/16. Every onset is computed from
+    /// the transport position rather than by adding gaps up, so the pattern
+    /// cannot drift and every voice lands on the same grid. Timing jitter
+    /// pushes each onset off its grid line by up to half a step but never
+    /// moves the grid itself.
+    ///
+    /// Locking to the grid takes one step without a grain. The same happens
+    /// when the step changes, or when the transport jumps (a loop point, a
+    /// relocate), so a stale grid line cannot leave a long hole.
+    fn schedule_synced(
+        &mut self,
+        grain_beats: f64,
+        cloud_settings: &CloudSettings,
+        beat: f64,
+        sample_rate: f64,
+        rng: &mut Rng,
+    ) -> bool {
+        let step = (grain_beats / cloud_settings.density.max(0.1)).max(1e-4);
+        let beats_per_sample = usable_tempo(cloud_settings.tempo_bpm) / 60.0 / sample_rate;
+
+        let due = self.grid_index as f64 * step - beat;
+        let in_step = self.grid_locked
+            && (step - self.grid_step).abs() < 1e-9
+            && (-step * 1.01..=step * 1.01).contains(&due);
+
+        let fire = in_step;
+        if in_step {
+            self.grid_index += 1;
+        } else {
+            self.grid_step = step;
+            self.grid_locked = true;
+            self.grid_index = (beat / step - 1e-9).ceil() as i64;
+        }
+
+        let target = self.grid_index as f64 * step;
+        let offset = rng.bipolar() * cloud_settings.timing_jitter.clamp(0.0, 1.0) * 0.5 * step;
+        self.countdown = ((target + offset - beat) / beats_per_sample).max(1.0);
+        fire
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -213,7 +375,7 @@ mod tests {
         let mut peak = 0.0f64;
         let mut energy = 0.0f64;
         for _ in 0..44100 {
-            let (l, r) = cloud.render(&corpus, &s, 1.0, 0.8, 44100.0, &mut rng);
+            let (l, r) = cloud.render(&corpus, &s, 1.0, 0.8, 44100.0, 0.0, &mut rng);
             assert!(l.is_finite() && r.is_finite());
             peak = peak.max(l.abs()).max(r.abs());
             energy += l * l + r * r;
@@ -241,7 +403,7 @@ mod tests {
             let mut prev = 0.0;
             let mut crossings = 0;
             for _ in 0..44100 {
-                let (l, _) = cloud.render(&corpus, &s, ratio, 0.8, sr, &mut rng);
+                let (l, _) = cloud.render(&corpus, &s, ratio, 0.8, sr, 0.0, &mut rng);
                 if (l >= 0.0) != (prev >= 0.0) {
                     crossings += 1;
                 }
@@ -309,7 +471,7 @@ mod tests {
             let mut blocks = Vec::new();
             let mut e = 0.0;
             for i in 0..44100 {
-                let (l, r) = cloud.render(&corpus, &s, 1.0, 0.8, sr, &mut rng);
+                let (l, r) = cloud.render(&corpus, &s, 1.0, 0.8, sr, 0.0, &mut rng);
                 e += l * l + r * r;
                 if (i + 1) % 220 == 0 {
                     blocks.push(e);
@@ -345,9 +507,177 @@ mod tests {
                 1.0,
                 0.5,
                 44100.0,
+                0.0,
                 &mut rng,
             );
             assert_eq!((l, r), (0.0, 0.0));
         }
+    }
+    #[test]
+    fn note_values_have_the_right_length() {
+        assert_eq!(SizeSync::Free.beats(), None);
+        assert_eq!(SizeSync::Div4.beats(), Some(1.0));
+        assert_eq!(SizeSync::Div8.beats(), Some(0.5));
+        assert_eq!(SizeSync::Bar1.beats(), Some(4.0));
+        // A dotted note is 1.5x, a triplet 2/3 of the plain value.
+        assert_eq!(SizeSync::Div8D.beats(), Some(0.75));
+        assert!((SizeSync::Div8T.beats().unwrap() - 1.0 / 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn synced_length_follows_tempo() {
+        assert!((synced_length_s(1.0, 120.0) - 0.5).abs() < 1e-12);
+        assert!((synced_length_s(1.0, 60.0) - 1.0).abs() < 1e-12);
+        assert!((synced_length_s(0.5, 240.0) - 0.125).abs() < 1e-12);
+        // Missing or broken tempo falls back to 120 BPM.
+        assert_eq!(synced_length_s(1.0, 0.0), synced_length_s(1.0, 120.0));
+        assert_eq!(synced_length_s(1.0, f64::NAN), synced_length_s(1.0, 120.0));
+        assert!(synced_length_s(4.0, 1.0) <= 4.0);
+    }
+
+    /// Runs a synced cloud against a beat clock and returns the transport
+    /// position, in beats, of every grain onset.
+    fn synced_onsets(s: &CloudSettings, beats: f64, jump: Option<(f64, f64)>) -> Vec<f64> {
+        let sr = 44100.0;
+        let sine: Vec<f32> = (0..44100 * 2)
+            .map(|i| (std::f64::consts::TAU * 200.0 * i as f64 / sr).sin() as f32)
+            .collect();
+        let corpus = Corpus::from_mono("sine", sine, sr);
+        let mut cloud = GrainCloud::new();
+        let mut rng = Rng::new(3);
+        let bps = s.tempo_bpm / 60.0 / sr;
+        let mut beat = 0.0;
+        let mut jumped = false;
+        let mut onsets = Vec::new();
+        while beat < beats {
+            if let Some((at, to)) = jump {
+                if !jumped && beat >= at {
+                    beat = to;
+                    jumped = true;
+                }
+            }
+            cloud.render(&corpus, s, 1.0, 0.8, sr, beat, &mut rng);
+            if cloud.grains.iter().any(|g| g.is_on && g.age == 1) {
+                onsets.push(beat);
+            }
+            beat += bps;
+        }
+        onsets
+    }
+
+    fn synced(beats: f64, density: f64, jitter: f64) -> CloudSettings {
+        CloudSettings {
+            sync_beats: Some(beats),
+            grain_length_s: synced_length_s(beats, 120.0),
+            tempo_bpm: 120.0,
+            density,
+            timing_jitter: jitter,
+            detune_cents: 0.0,
+            start_position_spread: 0.5,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn synced_onsets_sit_on_the_beat_grid() {
+        // 1/8 notes at density 2 means a grain every 1/16, a quarter beat.
+        let s = synced(0.5, 2.0, 0.0);
+        let onsets = synced_onsets(&s, 16.0, None);
+        let step = 0.25;
+        let one_sample = 120.0 / 60.0 / 44100.0;
+        assert!(onsets.len() >= 60, "only {} onsets", onsets.len());
+        for b in &onsets {
+            let off = (b / step - (b / step).round()).abs() * step;
+            assert!(
+                off < 2.0 * one_sample,
+                "onset at beat {b} is off grid by {off}"
+            );
+        }
+        // No gaps and no doubles after locking.
+        for w in onsets.windows(2) {
+            assert!((w[1] - w[0] - step).abs() < 2.0 * one_sample, "{w:?}");
+        }
+    }
+
+    #[test]
+    fn synced_onsets_do_not_drift() {
+        // Many bars in, the grid still lines up exactly.
+        let s = synced(1.0, 1.0, 0.0);
+        let onsets = synced_onsets(&s, 128.0, None);
+        let last = *onsets.last().unwrap();
+        let one_sample = 120.0 / 60.0 / 44100.0;
+        assert!(
+            (last - last.round()).abs() < 2.0 * one_sample,
+            "last onset {last}"
+        );
+    }
+
+    #[test]
+    fn synced_jitter_stays_within_half_a_step() {
+        let s = synced(0.5, 1.0, 1.0);
+        let onsets = synced_onsets(&s, 32.0, None);
+        let step = 0.5;
+        let one_sample = 120.0 / 60.0 / 44100.0;
+        assert!(onsets.len() > 40);
+        let mut moved = 0;
+        for b in &onsets {
+            let off = (b / step - (b / step).round()).abs() * step;
+            assert!(
+                off <= 0.5 * step + 2.0 * one_sample,
+                "offset {off} at beat {b}"
+            );
+            if off > 0.02 {
+                moved += 1;
+            }
+        }
+        assert!(moved > onsets.len() / 2, "jitter did not move onsets");
+    }
+
+    #[test]
+    fn synced_cloud_recovers_after_a_transport_jump() {
+        // A loop point sends the transport from beat 4 back to beat 0.
+        let s = synced(0.5, 1.0, 0.0);
+        let onsets = synced_onsets(&s, 6.0, Some((4.0, 0.0)));
+        let jump = onsets
+            .windows(2)
+            .position(|w| w[1] < w[0])
+            .expect("no onset after the jump")
+            + 1;
+        let after = &onsets[jump..];
+        // Grains resume within one step of the jump and keep the grid.
+        assert!(
+            after[0] <= 0.5 + 1e-3,
+            "first onset after jump at {}",
+            after[0]
+        );
+        assert!(
+            after.len() >= 11,
+            "only {} onsets after the jump",
+            after.len()
+        );
+        let one_sample = 120.0 / 60.0 / 44100.0;
+        for b in after {
+            let off = (b / 0.5 - (b / 0.5).round()).abs() * 0.5;
+            assert!(off < 2.0 * one_sample, "off grid at {b}");
+        }
+        // No hole longer than one step anywhere, including across the jump.
+        for w in onsets[..jump].windows(2).chain(after.windows(2)) {
+            assert!(w[1] - w[0] < 0.51, "hole {w:?}");
+        }
+    }
+
+    #[test]
+    fn free_mode_ignores_the_beat_clock() {
+        let sr = 44100.0;
+        let corpus = Corpus::builtin(sr);
+        let run = |beat_of: &dyn Fn(usize) -> f64| {
+            let mut cloud = GrainCloud::new();
+            let mut rng = Rng::new(8);
+            let s = CloudSettings::default();
+            (0..20000)
+                .map(|i| cloud.render(&corpus, &s, 1.0, 0.8, sr, beat_of(i), &mut rng))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(&|_| 0.0), run(&|i| i as f64 * 0.001));
     }
 }
